@@ -1,17 +1,12 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
-import { supabase } from "@/integrations/supabase/client";
+import { getAuthState } from "@/lib/api-client";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
-    const { data, error } = await supabase.auth.getUser();
-    if (error || !data.user) throw redirect({ to: "/auth" });
-    const { data: isAdmin } = await supabase.rpc("has_role", {
-      _user_id: data.user.id,
-      _role: "admin",
-    });
-    if (!isAdmin) throw redirect({ to: "/auth", search: { unauthorized: "1" } });
-    return { user: data.user };
+    const state = await getAuthState().catch(() => null);
+    if (!state?.user) throw redirect({ to: "/" });
+    return { user: state.user };
   },
   component: () => <Outlet />,
 });

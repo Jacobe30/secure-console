@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "secure-console",
+  "main": ".output/server/index.mjs",
+  "compatibility_date": "2026-09-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "no_bundle": true,
+  "assets": {
+    "binding": "ASSETS",
+    "directory": ".output/public",
+  },
+  "rules": [
+    {
+      "type": "ESModule",
+      "globs": ["**/*.mjs", "**/*.js"],
+    },
+  ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "REPLACE_WITH_HYPERDRIVE_ID",
+    },
+  ],
+  "vars": {
+    "SESSION_COOKIE_NAME": "admin_session",
+    "SESSION_TTL_HOURS": "12",
+    "PASSWORD_ITERATIONS": "210000",
+    "COOKIE_SECURE": "true",
+    "PUBLIC_INTAKE_ORIGINS": "https://your-customer-site.example",
+  },
+  "observability": {
+    "enabled": true,
+  },
+}
