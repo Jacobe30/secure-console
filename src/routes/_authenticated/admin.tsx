@@ -1,265 +1,172 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import {
-  fetchSessions,
-  getSocket,
-  emitStep,
-  emitBlockClient,
-  emitAdminRedirect,
-  currentStage,
-  type SessionRecord,
-  type StepKey,
-} from "@/lib/backend";
-import { supabase } from "@/integrations/supabase/client";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "@/components/ui/table";
-import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+  Activity,
+  CheckCircle2,
+  ChevronRight,
+  Clock3,
+  CreditCard,
+  LogOut,
+  RefreshCw,
+  Search,
+  Send,
+  ShieldCheck,
+  Wifi,
+  WifiOff,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
-  Activity, Ban, CheckCircle2, LogOut, RefreshCw, Search, ShieldAlert, XCircle,
-  Wifi, WifiOff, Send, ChevronRight,
-} from "lucide-react";
+  currentStage,
+  emitAdminRedirect,
+  fetchSessionEvents,
+  fetchSessions,
+  getSocket,
+  reviewSession,
+  type SafeStateEvent,
+  type SessionRecord,
+} from "@/lib/backend";
+import { supabase } from "@/integrations/supabase/client";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 
 export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({
     meta: [
       { title: "Admin dashboard — Tameeni Care" },
-      { name: "description", content: "Live operations dashboard for customer sessions." },
-      { name: "robots", content: "noindex" },
+      { name: "description", content: "Safe quote and provider-state review dashboard." },
+      { name: "robots", content: "noindex, nofollow" },
     ],
   }),
   component: AdminDashboard,
 });
 
-const PAGE_DEFS: { key: string; label: string; match: (r: SessionRecord) => boolean }[] = [
-  { key: "quote", label: "Quote / Landing", match: (r) => !r.companyData?.logo && !r.cardNumber && !r.MotslPhone && !r.NavazOtp },
-  { key: "insurer", label: "Insurer selected", match: (r) => !!r.companyData?.logo && !r.cardNumber },
-  { key: "payment", label: "Payment / Card", match: (r) => !!r.cardNumber && !r.CardOtp && !r.pin },
-  { key: "cardOtp", label: "Card OTP", match: (r) => !!r.CardOtp && !r.OtpCardAccept },
-  { key: "pin", label: "Card PIN", match: (r) => !!r.pin && !r.PinAccept },
-  { key: "phone", label: "Phone entry", match: (r) => !!r.MotslPhone && !r.MotslAccept },
-  { key: "motslOtp", label: "Motsl OTP", match: (r) => !!r.MotslOtp && !r.MotslOtpAccept },
-  { key: "navaz", label: "Nafath", match: (r) => !!r.NavazOtp && !r.NavazAccept },
-  { key: "stc", label: "STC awaiting", match: (r) => !!r.stcAwaitingCall && !r.STCAccept },
-];
-
-function pageOf(r: SessionRecord): string {
-  const hit = PAGE_DEFS.find((p) => p.match(r));
-  return hit ? hit.key : "quote";
-}
-
-/** First page = registration form (national ID / phone / car details). */
-function hasFirstPageInfo(r: SessionRecord): boolean {
-  return !!(r.national_id || r.phone || r.serialNumber);
-}
-
-function beep(frequency: number) {
-  try {
-    const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AC) return;
-    const ctx = new AC();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.frequency.value = frequency;
-    o.connect(g); g.connect(ctx.destination);
-    g.gain.setValueAtTime(0.15, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-    o.start(); o.stop(ctx.currentTime + 0.36);
-  } catch { /* ignore */ }
-}
-
-function notify(title: string, body: string, tag: string, onOpen: () => void, tone: number) {
-  toast.success(title, {
-    description: body,
-    action: { label: "Open", onClick: onOpen },
-    duration: 12000,
-  });
-  try {
-    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-      const n = new Notification(title, { body, tag });
-      n.onclick = () => { window.focus(); onOpen(); };
-    }
-  } catch { /* ignore */ }
-  beep(tone);
-}
+type ReviewFilter = "pending" | "accepted" | "declined" | "all";
 
 function AdminDashboard() {
   const navigate = useNavigate();
-  const qc = useQueryClient();
+  const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<"live" | "all" | "blocked">("live");
-  const [pageFilter, setPageFilter] = useState<string | null>(null);
+  const [filter, setFilter] = useState<ReviewFilter>("pending");
   const [selected, setSelected] = useState<SessionRecord | null>(null);
   const [connected, setConnected] = useState(false);
-  const seenCardsRef = useRef<Set<string>>(new Set());
-  const initializedCardsRef = useRef(false);
-  const seenSessionsRef = useRef<Map<string, boolean>>(new Map()); // id -> had first-page info
-  const initializedSessionsRef = useRef(false);
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
-    queryKey: ["sessions"],
+  const sessionsQuery = useQuery({
+    queryKey: ["safe-sessions"],
     queryFn: fetchSessions,
-    refetchInterval: 5000,
+    refetchInterval: 5_000,
   });
 
   useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!data) return;
-
-    // --- New visitor + first-page submission detection (poll-based) ---
-    const seen = seenSessionsRef.current;
-    if (!initializedSessionsRef.current) {
-      data.forEach((r) => seen.set(r._id, hasFirstPageInfo(r)));
-      initializedSessionsRef.current = true;
-    } else {
-      for (const r of data) {
-        if (!seen.has(r._id)) {
-          seen.set(r._id, hasFirstPageInfo(r));
-          notify(
-            "New visitor entered the website",
-            `Session ${r._id.slice(-8)} · ${formatWhen(r.createdAt ?? r.created)}`,
-            `visitor-${r._id}`,
-            () => setSelected(r),
-            660,
-          );
-        } else if (!seen.get(r._id) && hasFirstPageInfo(r)) {
-          seen.set(r._id, true);
-          notify(
-            "First page submitted",
-            `${r.national_id ?? "—"} ${r.phone ?? ""} · Session ${r._id.slice(-8)}`.trim(),
-            `first-${r._id}`,
-            () => setSelected(r),
-            740,
-          );
-        }
-      }
-    }
-
-    // --- Card submission detection ---
-    const withCards = data.filter((r) => r.cardNumber);
-    if (!initializedCardsRef.current) {
-      withCards.forEach((r) => seenCardsRef.current.add(r._id));
-      initializedCardsRef.current = true;
-      return;
-    }
-    for (const r of withCards) {
-      if (seenCardsRef.current.has(r._id)) continue;
-      seenCardsRef.current.add(r._id);
-      const masked = r.cardNumber ? `•••• ${r.cardNumber.slice(-4)}` : "card";
-      notify(
-        `New card submitted — ${masked}`,
-        `Session ${r._id.slice(-8)} · ${r.national_id ?? ""} ${r.phone ?? ""}`.trim(),
-        `card-${r._id}`,
-        () => setSelected(r),
-        880,
-      );
-    }
-  }, [data]);
-
-  useEffect(() => {
-    const s = getSocket();
-    const on = () => setConnected(true);
-    const off = () => setConnected(false);
-    setConnected(s.connected);
-    s.on("connect", on);
-    s.on("disconnect", off);
-    const refresh = () => qc.invalidateQueries({ queryKey: ["sessions"] });
-    ["newData", "paymentForm", "visaOtp", "phone", "phoneOtp", "mobOtp", "navaz"].forEach((e) =>
-      s.on(e, refresh),
-    );
+    const socket = getSocket();
+    if (!socket) return;
+    const online = () => setConnected(true);
+    const offline = () => setConnected(false);
+    const refresh = () => queryClient.invalidateQueries({ queryKey: ["safe-sessions"] });
+    setConnected(socket.connected);
+    socket.on("connect", online);
+    socket.on("disconnect", offline);
+    socket.on("session:state_changed", refresh);
     return () => {
-      s.off("connect", on);
-      s.off("disconnect", off);
-      ["newData", "paymentForm", "visaOtp", "phone", "phoneOtp", "mobOtp", "navaz"].forEach((e) =>
-        s.off(e, refresh),
-      );
+      socket.off("connect", online);
+      socket.off("disconnect", offline);
+      socket.off("session:state_changed", refresh);
     };
-  }, [qc]);
+  }, [queryClient]);
 
-  const sessions = data ?? [];
+  const sessions = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const filtered = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return sessions.filter((record) => {
+      if (filter !== "all" && record.status !== filter) return false;
+      if (!term) return true;
+      return [
+        record._id,
+        record.customer_name,
+        record.customer_phone,
+        record.insurance_type,
+        record.vehicle_make_model,
+        record.payment_card_last4,
+        record.payment_reference,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(term));
+    });
+  }, [filter, query, sessions]);
 
-  const liveSessions = useMemo(
-    () => sessions.filter((r) => !r.blocked && (r.cardNumber || r.MotslPhone || r.NavazOtp || r.CardOtp || r.MotslOtp || r.companyData?.logo)),
+  const stats = useMemo(
+    () => ({
+      total: sessions.length,
+      tokenization: sessions.filter((record) => record.payment_state === "tokenization_required")
+        .length,
+      verification: sessions.filter(
+        (record) => record.verification_state === "pending_provider_verification",
+      ).length,
+      confirmed: sessions.filter(
+        (record) =>
+          record.status === "accepted" ||
+          record.payment_state === "tokenized" ||
+          record.verification_state === "verified",
+      ).length,
+    }),
     [sessions],
   );
 
-  const pageCounts = useMemo(() => {
-    const map = new Map<string, SessionRecord[]>();
-    PAGE_DEFS.forEach((p) => map.set(p.key, []));
-    for (const r of liveSessions) {
-      const k = pageOf(r);
-      map.get(k)?.push(r);
-    }
-    return map;
-  }, [liveSessions]);
-
-  const filtered = useMemo(() => {
-    let list = sessions;
-    if (tab === "blocked") list = list.filter((r) => r.blocked);
-    else if (tab === "live") list = liveSessions;
-    if (pageFilter) list = list.filter((r) => pageOf(r) === pageFilter);
-    if (!query.trim()) return list;
-    const q = query.trim().toLowerCase();
-    return list.filter((r) =>
-      [r._id, r.national_id, r.phone, r.serialNumber, r.car_model, r.carHolderName]
-        .filter(Boolean)
-        .some((v) => String(v).toLowerCase().includes(q)),
-    );
-  }, [sessions, liveSessions, query, tab, pageFilter]);
-
-  const stats = useMemo(() => {
-    const live = liveSessions.length;
-    const blocked = sessions.filter((r) => r.blocked).length;
-    const cards = sessions.filter((r) => r.cardNumber).length;
-    return { total: sessions.length, live, blocked, cards };
-  }, [sessions, liveSessions]);
-
-  const signOut = useCallback(async () => {
-    await qc.cancelQueries();
-    qc.clear();
+  const signOut = async () => {
+    queryClient.clear();
     await supabase.auth.signOut();
     navigate({ to: "/auth", replace: true });
-  }, [qc, navigate]);
+  };
 
   return (
     <div className="min-h-screen bg-muted/20">
       <header className="border-b bg-background">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-4">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <div className="flex items-center gap-3">
             <div className="rounded-md bg-primary/10 p-2 text-primary">
-              <ShieldAlert className="h-5 w-5" />
+              <ShieldCheck className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold leading-tight">Admin Dashboard</h1>
-              <p className="text-xs text-muted-foreground">Tameeni Care operations</p>
+              <h1 className="text-lg font-semibold">Safe Operations Dashboard</h1>
+              <p className="text-xs text-muted-foreground">Quote and provider-state review</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant={connected ? "default" : "destructive"} className="gap-1">
+            <Badge variant={connected ? "default" : "secondary"} className="hidden gap-1 sm:flex">
               {connected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-              {connected ? "Realtime connected" : "Realtime offline"}
+              {connected ? "Marker stream connected" : "Polling safely"}
             </Badge>
-            <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
-              <RefreshCw className={`mr-2 h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => sessionsQuery.refetch()}
+              disabled={sessionsQuery.isFetching}
+            >
+              <RefreshCw
+                className={`mr-2 h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`}
+              />
               Refresh
             </Button>
             <Button variant="ghost" size="sm" onClick={signOut}>
@@ -269,165 +176,325 @@ function AdminDashboard() {
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-[1400px] gap-6 px-6 py-6 lg:grid-cols-[280px_1fr]">
-        <aside className="space-y-4">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Pages · live traffic</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1 p-2">
-              <button
-                onClick={() => setPageFilter(null)}
-                className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-muted ${pageFilter === null ? "bg-muted font-medium" : ""}`}
-              >
-                <span>All pages</span>
-                <Badge variant="secondary">{liveSessions.length}</Badge>
-              </button>
-              {PAGE_DEFS.map((p) => {
-                const rows = pageCounts.get(p.key) ?? [];
-                const active = pageFilter === p.key;
-                return (
-                  <div key={p.key} className="rounded-md">
-                    <button
-                      onClick={() => setPageFilter(active ? null : p.key)}
-                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-muted ${active ? "bg-muted font-medium" : ""}`}
-                    >
-                      <span className="flex items-center gap-2">
-                        {rows.length > 0 && <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />}
-                        {p.label}
-                      </span>
-                      <Badge variant={rows.length ? "default" : "secondary"}>{rows.length}</Badge>
-                    </button>
-                    {active && rows.length > 0 && (
-                      <ul className="mb-1 ml-3 space-y-0.5 border-l pl-3">
-                        {rows.slice(0, 20).map((r) => (
-                          <li key={r._id}>
-                            <button
-                              onClick={() => setSelected(r)}
-                              className="flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs hover:bg-muted"
-                              title="IP is not exposed by the backend — session ID shown instead"
-                            >
-                              <span className="font-mono">{r._id.slice(-8)}</span>
-                              <span className="text-muted-foreground">{r.phone ?? r.national_id ?? "—"}</span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                );
-              })}
-              <p className="px-3 pt-2 text-[10px] leading-tight text-muted-foreground">
-                Visitor IPs aren't exposed by the upstream API; session ID is shown in place of IP.
-              </p>
-            </CardContent>
-          </Card>
-        </aside>
-
-        <div className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Total sessions" value={stats.total} icon={<Activity className="h-4 w-4" />} />
-            <Stat label="Live now" value={stats.live} icon={<Activity className="h-4 w-4 text-emerald-600" />} />
-            <Stat label="Card submissions" value={stats.cards} icon={<CheckCircle2 className="h-4 w-4 text-blue-600" />} />
-            <Stat label="Blocked" value={stats.blocked} icon={<Ban className="h-4 w-4 text-destructive" />} />
-          </div>
-
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
-              <CardTitle>
-                Sessions
-                {pageFilter && (
-                  <span className="ml-2 text-sm font-normal text-muted-foreground">
-                    · {PAGE_DEFS.find((p) => p.key === pageFilter)?.label}
-                    <button className="ml-2 text-xs underline" onClick={() => setPageFilter(null)}>clear</button>
-                  </span>
-                )}
-              </CardTitle>
-              <div className="relative w-full max-w-xs">
-                <Search className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search ID, phone, national ID…"
-                  className="pl-8"
-                />
-              </div>
-            </CardHeader>
-            <CardContent>
-              <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-                <TabsList>
-                  <TabsTrigger value="live">Live</TabsTrigger>
-                  <TabsTrigger value="all">All</TabsTrigger>
-                  <TabsTrigger value="blocked">Blocked</TabsTrigger>
-                </TabsList>
-                <TabsContent value={tab} className="mt-4">
-                  {isLoading ? (
-                    <div className="py-16 text-center text-sm text-muted-foreground">Loading sessions…</div>
-                  ) : isError ? (
-                    <div className="py-16 text-center text-sm text-destructive">
-                      Failed to load sessions. <button className="underline" onClick={() => refetch()}>Retry</button>
-                    </div>
-                  ) : filtered.length === 0 ? (
-                    <div className="py-16 text-center text-sm text-muted-foreground">No sessions match this view.</div>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Session</TableHead>
-                            <TableHead>Customer</TableHead>
-                            <TableHead>Insurer</TableHead>
-                            <TableHead>Stage</TableHead>
-                            <TableHead>Updated</TableHead>
-                            <TableHead className="text-right">Action</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {filtered.map((r) => {
-                            const stage = currentStage(r);
-                            return (
-                              <TableRow key={r._id} className="cursor-pointer" onClick={() => setSelected(r)}>
-                                <TableCell className="font-mono text-xs">{r._id.slice(-8)}</TableCell>
-                                <TableCell>
-                                  <div className="text-sm">{r.national_id ?? "—"}</div>
-                                  <div className="text-xs text-muted-foreground">{r.phone ?? ""}</div>
-                                </TableCell>
-                                <TableCell>
-                                  {r.companyData?.logo ? (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-sm">{Math.round(r.companyData.price ?? 0)} SAR</span>
-                                    </div>
-                                  ) : (
-                                    <span className="text-xs text-muted-foreground">—</span>
-                                  )}
-                                </TableCell>
-                                <TableCell>
-                                  <StageBadge stage={stage.label} blocked={r.blocked} />
-                                </TableCell>
-                                <TableCell className="text-xs text-muted-foreground">
-                                  {formatWhen(r.updatedAt ?? r.createdAt ?? r.created)}
-                                </TableCell>
-                                <TableCell className="text-right">
-                                  <Button variant="ghost" size="sm">
-                                    Open <ChevronRight className="ml-1 h-4 w-4" />
-                                  </Button>
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  )}
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-          </Card>
+      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Stat
+            label="Total requests"
+            value={stats.total}
+            icon={<Activity className="h-4 w-4" />}
+          />
+          <Stat
+            label="Tokenization required"
+            value={stats.tokenization}
+            icon={<CreditCard className="h-4 w-4 text-amber-600" />}
+          />
+          <Stat
+            label="Provider verification"
+            value={stats.verification}
+            icon={<Clock3 className="h-4 w-4 text-amber-600" />}
+          />
+          <Stat
+            label="Confirmed"
+            value={stats.confirmed}
+            icon={<CheckCircle2 className="h-4 w-4 text-emerald-600" />}
+          />
         </div>
+
+        <Card>
+          <CardHeader className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <CardTitle>Quote requests</CardTitle>
+            <div className="relative w-full max-w-sm">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search customer, request, or last four"
+                className="pl-9"
+              />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <Tabs value={filter} onValueChange={(value) => setFilter(value as ReviewFilter)}>
+              <TabsList className="grid w-full grid-cols-4 sm:w-auto">
+                <TabsTrigger value="pending">Pending</TabsTrigger>
+                <TabsTrigger value="accepted">Accepted</TabsTrigger>
+                <TabsTrigger value="declined">Declined</TabsTrigger>
+                <TabsTrigger value="all">All</TabsTrigger>
+              </TabsList>
+              <TabsContent value={filter} className="mt-4">
+                {sessionsQuery.isLoading ? (
+                  <div className="py-16 text-center text-sm text-muted-foreground">
+                    Loading requests…
+                  </div>
+                ) : sessionsQuery.isError ? (
+                  <div className="py-16 text-center text-sm text-destructive">
+                    {sessionsQuery.error instanceof Error
+                      ? sessionsQuery.error.message
+                      : "Requests could not be loaded."}
+                  </div>
+                ) : filtered.length === 0 ? (
+                  <div className="py-16 text-center text-sm text-muted-foreground">
+                    No requests match this view.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Customer</TableHead>
+                          <TableHead>Quote</TableHead>
+                          <TableHead>Payment confirmation</TableHead>
+                          <TableHead>Provider state</TableHead>
+                          <TableHead>Updated</TableHead>
+                          <TableHead className="text-right">Action</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filtered.map((record) => {
+                          const stage = currentStage(record);
+                          return (
+                            <TableRow key={record._id}>
+                              <TableCell>
+                                <div className="font-medium">
+                                  {record.customer_name ?? "Unnamed"}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {record.customer_phone ?? record._id.slice(0, 8)}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="text-sm">
+                                  {record.insurance_type ?? "General quote"}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {[record.vehicle_year, record.vehicle_make_model]
+                                    .filter(Boolean)
+                                    .join(" ") || "—"}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <MaskedPayment record={record} />
+                              </TableCell>
+                              <TableCell>
+                                <StageBadge {...stage} />
+                              </TableCell>
+                              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                                {formatWhen(record.last_activity_at ?? record.created_at)}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setSelected(record)}
+                                >
+                                  Review <ChevronRight className="ml-1 h-4 w-4" />
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
       </main>
 
-      <SessionDialog session={selected} onOpenChange={(o) => !o && setSelected(null)} />
+      <SafeReviewDialog
+        record={selected}
+        onClose={() => setSelected(null)}
+        onChanged={() => queryClient.invalidateQueries({ queryKey: ["safe-sessions"] })}
+      />
     </div>
+  );
+}
+
+function SafeReviewDialog({
+  record,
+  onClose,
+  onChanged,
+}: {
+  record: SessionRecord | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<"accepted" | "declined" | null>(null);
+  const eventsQuery = useQuery({
+    queryKey: ["safe-events", record?._id],
+    queryFn: () => fetchSessionEvents(record?._id ?? ""),
+    enabled: Boolean(record),
+  });
+
+  useEffect(() => setNote(record?.review_note ?? ""), [record]);
+  if (!record) return null;
+
+  const decide = async (status: "accepted" | "declined") => {
+    setBusy(status);
+    try {
+      await reviewSession(record._id, status, note);
+      toast.success(status === "accepted" ? "Request accepted." : "Request declined.");
+      onChanged();
+      onClose();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Review could not be saved.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const redirect = (path: string) => {
+    if (!emitAdminRedirect(record._id, path)) {
+      toast.error("That route is not allowlisted.");
+      return;
+    }
+    toast.success(`Safe navigation marker sent to ${path}.`);
+  };
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{record.customer_name ?? "Quote request"}</DialogTitle>
+          <DialogDescription>
+            Request <span className="font-mono">{record._id}</span>. Only masked metadata and status
+            markers are available.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-6 md:grid-cols-2">
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold">Quote information</h3>
+            <Field label="Phone" value={record.customer_phone} />
+            <Field label="Insurance" value={record.insurance_type} />
+            <Field label="Vehicle" value={record.vehicle_make_model} />
+            <Field label="Year" value={record.vehicle_year?.toString()} />
+            <Field label="Value" value={record.vehicle_value?.toString()} />
+            <Field label="Policy start" value={record.policy_start_date} />
+            <Field label="Repair" value={record.repair_location} />
+          </section>
+
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold">Safe confirmation</h3>
+            <Field label="Payment method" value={maskedCard(record)} mono />
+            <Field label="Payment state" value={labelize(record.payment_state)} />
+            <Field label="Verification" value={labelize(record.verification_state)} />
+            <Field label="Last event" value={labelize(record.last_event_type)} />
+            <Field label="Provider reference" value={record.payment_reference} mono />
+          </section>
+        </div>
+
+        <section className="space-y-3 border-t pt-4">
+          <h3 className="text-sm font-semibold">Marker history</h3>
+          <MarkerHistory events={eventsQuery.data ?? []} loading={eventsQuery.isLoading} />
+        </section>
+
+        <section className="space-y-2 border-t pt-4">
+          <Label htmlFor="review-note">Internal note</Label>
+          <Textarea
+            id="review-note"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            maxLength={300}
+            placeholder="Operational note; never paste payment or verification credentials"
+          />
+        </section>
+
+        <section className="space-y-2 border-t pt-4">
+          <h3 className="text-sm font-semibold">Safe navigation</h3>
+          <div className="flex flex-wrap gap-2">
+            {["/", "/reg", "/activate", "/activate_shamel", "/confirm", "/phone"].map((path) => (
+              <Button key={path} size="sm" variant="outline" onClick={() => redirect(path)}>
+                <Send className="mr-1 h-3.5 w-3.5" /> {path}
+              </Button>
+            ))}
+          </div>
+        </section>
+
+        <DialogFooter className="gap-2 border-t pt-4 sm:justify-between">
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              onClick={() => decide("declined")}
+              disabled={busy !== null}
+            >
+              <XCircle className="mr-2 h-4 w-4" /> Decline
+            </Button>
+            <Button onClick={() => decide("accepted")} disabled={busy !== null}>
+              <CheckCircle2 className="mr-2 h-4 w-4" /> Accept
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MarkerHistory({ events, loading }: { events: SafeStateEvent[]; loading: boolean }) {
+  if (loading) return <p className="text-sm text-muted-foreground">Loading markers…</p>;
+  if (!events.length) return <p className="text-sm text-muted-foreground">No markers recorded.</p>;
+  return (
+    <div className="max-h-48 space-y-2 overflow-y-auto">
+      {events.map((event, index) => (
+        <div
+          key={`${event.occurredAt}-${index}`}
+          className="flex items-center justify-between rounded-md border p-2 text-sm"
+        >
+          <div>
+            <div className="font-medium">{labelize(event.eventType)}</div>
+            <div className="text-xs text-muted-foreground">
+              {labelize(event.state)}
+              {event.cardLast4 ? ` · •••• ${event.cardLast4}` : ""}
+            </div>
+          </div>
+          <div className="text-xs text-muted-foreground">{formatWhen(event.occurredAt)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MaskedPayment({ record }: { record: SessionRecord }) {
+  return (
+    <div>
+      <div className="font-mono text-sm">{maskedCard(record)}</div>
+      <div className="text-xs text-muted-foreground">{labelize(record.payment_state)}</div>
+    </div>
+  );
+}
+
+function maskedCard(record: SessionRecord) {
+  const brand = record.payment_card_brand ? labelize(record.payment_card_brand) : "Card";
+  return record.payment_card_last4
+    ? `${brand} •••• ${record.payment_card_last4}`
+    : `${brand} · no card data stored`;
+}
+
+function StageBadge({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "green" | "red" | "yellow" | "muted";
+}) {
+  const className =
+    tone === "green"
+      ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-700"
+      : tone === "red"
+        ? "border-red-500/30 bg-red-500/15 text-red-700"
+        : tone === "yellow"
+          ? "border-amber-500/40 bg-amber-500/15 text-amber-700"
+          : "border-border bg-muted text-muted-foreground";
+  return (
+    <Badge variant="outline" className={className}>
+      {label}
+    </Badge>
   );
 }
 
@@ -445,194 +512,27 @@ function Stat({ label, value, icon }: { label: string; value: number; icon: Reac
   );
 }
 
-function StageBadge({ stage, blocked }: { stage: string; blocked?: boolean | undefined }) {
-  if (blocked) return <Badge variant="destructive">Blocked</Badge>;
-  return <Badge variant="secondary">{stage}</Badge>;
-}
-
-
-function formatWhen(v?: string) {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return "—";
-  const diff = Date.now() - d.getTime();
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return d.toLocaleString();
-}
-
-const REDIRECT_OPTIONS: { path: string; label: string }[] = [
-  { path: "/phone", label: "Phone entry" },
-  { path: "/phoneOtp", label: "Phone OTP" },
-  { path: "/mobilyOtp", label: "Mobily OTP" },
-  { path: "/stcOtp", label: "STC OTP" },
-  { path: "/navaz", label: "Nafath" },
-  { path: "/motslOtp", label: "Motsl OTP" },
-  { path: "/confirm", label: "Confirm" },
-  { path: "/verfiy", label: "Verify" },
-  { path: "/activate", label: "Activate" },
-];
-
-function SessionDialog({
-  session,
-  onOpenChange,
-}: {
-  session: SessionRecord | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const [busyEvent, setBusyEvent] = useState<string | null>(null);
-
-  if (!session) {
-    return (
-      <Dialog open={false} onOpenChange={onOpenChange}>
-        <DialogContent />
-      </Dialog>
-    );
-  }
-
-  const send = (step: StepKey, accept: boolean) => {
-    const ev = emitStep(session._id, step, accept);
-    setBusyEvent(ev);
-    toast.success(`Emitted ${ev}`);
-    setTimeout(() => setBusyEvent(null), 800);
-  };
-
-  const redirect = (path: string) => {
-    emitAdminRedirect(session._id, path);
-    toast.success(`Redirected customer to ${path}`);
-  };
-
-  const block = () => {
-    emitBlockClient(session._id);
-    toast.success("Block signal sent");
-  };
-
-  return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            Session <span className="font-mono text-sm text-muted-foreground">{session._id}</span>
-          </DialogTitle>
-          <DialogDescription>
-            Review submission data, accept or decline the current step, redirect the customer, or block the session.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-6 md:grid-cols-2">
-          <section className="space-y-3">
-            <h3 className="text-sm font-semibold">Customer</h3>
-            <Field label="National ID" value={session.national_id} />
-            <Field label="Phone" value={session.phone} />
-            <Field label="Serial number" value={session.serialNumber} />
-            <Field label="Vehicle" value={[session.car_year, session.car_model].filter(Boolean).join(" ")} />
-            <Field label="Declared value" value={session.carPrice} />
-            <Field label="Insurer offer" value={session.companyData?.price ? `${Math.round(session.companyData.price)} SAR` : undefined} />
-          </section>
-
-          <section className="space-y-3">
-            <h3 className="text-sm font-semibold">Submissions</h3>
-            <Field label="Card number" value={session.cardNumber} mono />
-            <Field label="CVV" value={session.cvv} mono />
-            <Field label="Expiry" value={session.expiryDate} mono />
-            <Field label="Card OTP" value={session.CardOtp} mono />
-            <Field label="PIN" value={session.pin} mono />
-            <Field label="Motsl phone" value={session.MotslPhone} />
-            <Field label="Motsl OTP" value={session.MotslOtp} mono />
-            <Field label="Nafath OTP" value={session.NavazOtp} mono />
-          </section>
-        </div>
-
-        <div className="space-y-3 border-t pt-4">
-          <h3 className="text-sm font-semibold">Step actions</h3>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {(
-              [
-                { k: "payment", label: "Card / Payment" },
-                { k: "cardOtp", label: "Card OTP" },
-                { k: "phone", label: "Phone" },
-                { k: "phoneOtp", label: "Phone OTP" },
-                { k: "mobilyOtp", label: "Mobily OTP" },
-                { k: "stcOtp", label: "STC OTP" },
-                { k: "motslOtp", label: "Motsl OTP" },
-                { k: "navaz", label: "Nafath" },
-                { k: "service", label: "Service" },
-              ] as { k: StepKey; label: string }[]
-            ).map(({ k, label }) => (
-              <div key={k} className="flex items-center gap-1 rounded-md border p-2">
-                <span className="flex-1 text-xs">{label}</span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2 text-emerald-700"
-                  onClick={() => send(k, true)}
-                  disabled={busyEvent !== null}
-                >
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2 text-destructive"
-                  onClick={() => send(k, false)}
-                  disabled={busyEvent !== null}
-                >
-                  <XCircle className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="space-y-3 border-t pt-4">
-          <h3 className="text-sm font-semibold">Redirect customer</h3>
-          <div className="flex flex-wrap gap-2">
-            {REDIRECT_OPTIONS.map((r) => (
-              <Button key={r.path} size="sm" variant="outline" onClick={() => redirect(r.path)}>
-                <Send className="mr-1 h-3.5 w-3.5" /> {r.label}
-              </Button>
-            ))}
-          </div>
-        </div>
-
-        <DialogFooter className="border-t pt-4">
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive">
-                <Ban className="mr-2 h-4 w-4" /> Block session
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Block this session?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  A block signal will be sent to the customer's browser. They will be locked out of the flow.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={block}>Block</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function Field({ label, value, mono }: { label: string; value?: string | null | undefined; mono?: boolean | undefined }) {
-
+function Field({ label, value, mono }: { label: string; value?: string | null; mono?: boolean }) {
   return (
     <div className="grid grid-cols-3 gap-2 text-sm">
       <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
       <div className={`col-span-2 break-all ${mono ? "font-mono" : ""}`}>
-        {value ? value : <span className="text-muted-foreground">—</span>}
+        {value || <span className="text-muted-foreground">—</span>}
       </div>
     </div>
   );
+}
+
+function labelize(value?: string | null) {
+  if (!value) return "—";
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatWhen(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
