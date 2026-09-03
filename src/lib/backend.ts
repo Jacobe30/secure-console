@@ -176,6 +176,11 @@ export function getSocket(): Socket | null {
     socket = io(REALTIME_BASE, {
       transports: ["websocket", "polling"],
       autoConnect: true,
+      auth: (callback) => {
+        void supabase.auth.getSession().then(({ data }) => {
+          callback({ token: data.session?.access_token ?? "" });
+        });
+      },
     });
     socket.on("connect", () => socket?.emit("monitor:join"));
   } else if (!socket.connected) {
